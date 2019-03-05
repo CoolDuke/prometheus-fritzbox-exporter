@@ -1,0 +1,7 @@
+fritzbox:
+  url: https://fritz.box:49232
+  username: ''
+  password: rootPassword
+
+exporter:
+  port: 9742
