@@ -40,6 +40,8 @@ type Exporter struct {
   boxinfoLifetime               *prometheus.GaugeVec
   boxinfoReboots                *prometheus.GaugeVec
 
+  internetStats                 *prometheus.GaugeVec
+
   homeAutoDevicePresent         *prometheus.GaugeVec
   homeAutoDeviceTemperature     *prometheus.GaugeVec
 }
@@ -90,6 +92,14 @@ func NewExporter() *Exporter {
       Help:      "Number of reboots since date of manufacture.",
     }, []string{"model","firmware_version"}),
 
+
+    internetStats: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "internet",
+      Name:      "bandwidth",
+      Help:      "Bandwidth for Internet access.",
+    }, []string{"direction","type"}),
+
     homeAutoDevicePresent: prometheus.NewGaugeVec(prometheus.GaugeOpts{
       Namespace: namespace,
       Subsystem: "homeauto",
@@ -117,6 +127,24 @@ func (e *Exporter) ScrapeBoxinfo() error {
     float64(boxinfo.Runtime.Years) * 365.24220 + float64(boxinfo.Runtime.Months) * 30.43685 + float64(boxinfo.Runtime.Days))
 
   e.boxinfoReboots.WithLabelValues(boxinfo.Model.Name, versionString).Set(float64(boxinfo.Runtime.Reboots))
+
+  return nil
+}
+
+func (e *Exporter) ScrapeInternetStats() error {
+  stats, err := fb.Internal.InternetStats()
+  if err != nil {
+    return err
+  }
+
+  e.internetStats.WithLabelValues("downstream", "internet").Set(avg(stats.DownstreamInternet))
+  e.internetStats.WithLabelValues("downstream", "media").Set(avg(stats.DownStreamMedia))
+  e.internetStats.WithLabelValues("downstream", "guest").Set(avg(stats.DownStreamGuest))
+  e.internetStats.WithLabelValues("upstream", "realtime").Set(avg(stats.UpstreamRealtime))
+  e.internetStats.WithLabelValues("upstream", "high").Set(avg(stats.UpstreamHighPriority))
+  e.internetStats.WithLabelValues("upstream", "default").Set(avg(stats.UpstreamDefaultPriority))
+  e.internetStats.WithLabelValues("upstream", "low").Set(avg(stats.UpstreamLowPriority))
+  e.internetStats.WithLabelValues("upstream", "guest").Set(avg(stats.UpstreamGuest))
 
   return nil
 }
@@ -161,6 +189,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
     e.ScrapeBoxinfo()
     e.boxinfoLifetime.Collect(ch)
     e.boxinfoReboots.Collect(ch)
+
+    e.ScrapeInternetStats()
+    e.internetStats.Collect(ch)
 
     e.ScrapeHomeAutoDevices()
     e.homeAutoDevicePresent.Collect(ch)
@@ -239,4 +270,14 @@ func main() {
 
     log.Info("Listening on", conf.Exporter.ListenAddress)
     log.Error(http.ListenAndServe(conf.Exporter.ListenAddress, nil))
+}
+
+func avg(slice[] float64) float64 {
+    sum := 0.0
+
+    for _, value := range slice {
+      sum += value
+    }
+
+    return sum / float64(len(slice))
 }
