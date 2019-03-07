@@ -5,6 +5,8 @@ import (
 
     "gopkg.in/yaml.v2"
     "github.com/op/go-logging"
+
+    fritzctlConfig "github.com/bpicode/fritzctl/config"
 )
 
 type Config struct {
@@ -16,6 +18,7 @@ type ConfigFritzBox struct {
   Url      string `yaml:"url"`
   Username string `yaml:"username"`
   Password string `yaml:"password"`
+  FritzctlConfig   fritzctlConfig.Config
 }
 
 type ConfigExporter struct {
@@ -38,6 +41,14 @@ func GetConfig(log *logging.Logger, filename string) (Config, error) {
   }
 
   //TODO: validate configuration
+
+  //provide configuration in a format fritzctl expects it
+  //TODO: rewrite URL
+  config.FritzBox.FritzctlConfig = fritzctlConfig.Config{
+    Net: &fritzctlConfig.Net{Protocol: "https", Host: "fritz.box", Port: "49232"},
+    Login: &fritzctlConfig.Login{LoginURL: "/login_sid.lua", Username: config.FritzBox.Username, Password: config.FritzBox.Password},
+    Pki: &fritzctlConfig.Pki{SkipTLSVerify: true, CertificateFile: ""},
+  }
 
   return config, nil
 }

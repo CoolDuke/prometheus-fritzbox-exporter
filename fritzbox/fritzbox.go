@@ -1,6 +1,8 @@
 package fritzbox
 
 import (
+    "net/http"
+    "crypto/tls"
     "net/url"
 
     "github.com/coolduke/prometheus-fritzbox-exporter/config"
@@ -14,6 +16,8 @@ type FritzBox struct {
   Log *logging.Logger
   Config *config.ConfigFritzBox
   HomeAuto fritz.HomeAuto
+  FritzClient fritz.Client
+  Internal fritz.Internal
 }
 
 func NewFritzBox(log *logging.Logger, conf config.ConfigFritzBox) (*FritzBox, error) {
@@ -37,7 +41,22 @@ func NewFritzBox(log *logging.Logger, conf config.ConfigFritzBox) (*FritzBox, er
     return nil, err
   }
 
-  return &FritzBox{Log: log, Config: &conf, HomeAuto: homeAuto}, nil
+  //build fritzctl client with config backed by our yaml file
+  configPtr := &conf.FritzctlConfig
+  tlsConfig := &tls.Config{InsecureSkipVerify: conf.FritzctlConfig.Pki.SkipTLSVerify}
+  transport := &http.Transport{TLSClientConfig: tlsConfig}
+  httpClient := &http.Client{Transport: transport}
+  fritzClient := &fritz.Client{Config: configPtr, HTTPClient: httpClient}
+
+  err = fritzClient.Login()
+  if err != nil {
+    log.Error("Unable to login")
+    return nil, err
+  }
+
+  internal := fritz.NewInternal(fritzClient)
+  
+  return &FritzBox{Log: log, Config: &conf, HomeAuto: homeAuto, FritzClient: *fritzClient, Internal: internal}, nil
 }
 
 func (fb *FritzBox) LogCurrentTemperatures() error {

@@ -1,9 +1,10 @@
 package main
 
 import (
-//    "fmt"
     "os"
 //    "flag"
+    "time"
+    "strconv"
     "net/http"
 
     
@@ -21,6 +22,7 @@ var format = logging.MustStringFormatter(
 
 var (
   fb *fritzbox.FritzBox
+  conf config.Config
 )
 
 // Metric name parts.
@@ -30,10 +32,11 @@ const (
 )
 
 type Exporter struct {
-  duration, error prometheus.Gauge
-  totalScrapes    prometheus.Counter
-  scrapeErrors    *prometheus.CounterVec
-  temperature     *prometheus.GaugeVec
+  duration, error, up           prometheus.Gauge
+  totalScrapes                  prometheus.Counter
+  scrapeErrors                  *prometheus.CounterVec
+  homeAutoDevicePresent         *prometheus.GaugeVec
+  homeAutoDeviceTemperature     *prometheus.GaugeVec
 }
 
 func NewExporter() *Exporter {
@@ -42,37 +45,76 @@ func NewExporter() *Exporter {
       Namespace: namespace,
       Subsystem: exporter,
       Name:      "last_scrape_duration_seconds",
-      Help:      "Duration of the last scrape of metrics from Oracle DB.",
+      Help:      "Duration of the last scrape.",
     }),
     totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
       Namespace: namespace,
       Subsystem: exporter,
       Name:      "scrapes_total",
-      Help:      "Total number of times Oracle DB was scraped for metrics.",
+      Help:      "Total number of scrapes.",
     }),
     scrapeErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
       Namespace: namespace,
       Subsystem: exporter,
       Name:      "scrape_errors_total",
-      Help:      "Total number of times an error occured scraping a Oracle database.",
+      Help:      "Total number of times an error occured while scraping.",
     }, []string{"collector"}),
     error: prometheus.NewGauge(prometheus.GaugeOpts{
       Namespace: namespace,
       Subsystem: exporter,
       Name:      "last_scrape_error",
-      Help:      "Whether the last scrape of metrics from Oracle DB resulted in an error (1 for error, 0 for success).",
+      Help:      "Whether the last scrape resulted in an error.",
     }),
-    temperature: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+    up: prometheus.NewGauge(prometheus.GaugeOpts{
       Namespace: namespace,
-      Name:      "temperature",
+      Subsystem: exporter,
+      Name:      "up",
+      Help:      "Whether the connection to the FritzBox is established.",
+    }),
+    homeAutoDevicePresent: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Name:      "homeauto_device_present",
+      Help:      "Whether the device is connected to the FritBox.",
+    }, []string{"uuid","name","productname"}),
+    homeAutoDeviceTemperature: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Name:      "homeauto_device_temperature",
       Help:      "Gauge metric with temperature (in Celsius) of connected devices.",
-    }, []string{"device","type"}),
+    }, []string{"uuid","name","productname"}),
   }
 }
 
-func (e *Exporter) ScrapeTemperature() {
-  fb.LogCurrentTemperatures()
+func (e *Exporter) ScrapeHomeAutoDevices() error {
+  devices, err := fb.HomeAuto.List()
+  if err != nil {
+    return err
+  }
+
+  for _, device := range devices.Devices {
+    //device up?
+    e.homeAutoDevicePresent.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(float64(device.Present))
+
+    //temperature if available
+    temperature, err := strconv.ParseFloat(device.Temperature.FmtCelsius(), 64)
+    if err == nil {
+      e.homeAutoDeviceTemperature.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(temperature)
+    }
+  }
+
+  return nil
 }
+
+func (e *Exporter) ScrapeUptime() error {
+  boxinfo, err := fb.Internal.BoxInfo()
+  if err != nil {
+    return err
+  }
+
+  log.Debug(boxinfo)
+
+  return nil
+}
+
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
   var err error
@@ -87,19 +129,61 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
     }
   }(time.Now())
 
-  e.Connect()
+  err = e.Connect()
+  if err == nil {
+    e.error.Set(0)
+
+    e.ScrapeHomeAutoDevices()
+    e.homeAutoDevicePresent.Collect(ch)
+    e.homeAutoDeviceTemperature.Collect(ch)
+
+    e.ScrapeUptime()
+    
+  } else {
+    e.error.Set(1)
+  }
   e.up.Collect(ch)
 
-  e.ScrapeUptime()
-  e.uptime.Collect(ch)
-
-  e.ScrapeTemperature()
-  e.temperature.Collect(ch)
 
   ch <- e.duration
   ch <- e.totalScrapes
   ch <- e.error
   e.scrapeErrors.Collect(ch)
+}
+
+func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
+  e.duration.Describe(ch)
+  e.totalScrapes.Describe(ch)
+  e.scrapeErrors.Describe(ch)
+  e.up.Describe(ch)
+
+  e.homeAutoDevicePresent.Describe(ch)
+  e.homeAutoDeviceTemperature.Describe(ch)
+}
+
+func (e *Exporter) Connect() error {
+  var err error
+
+  log.Debug("Scraping...")
+
+  if fb == nil {
+    fb, err = fritzbox.NewFritzBox(log, *conf.FritzBox)
+    if err != nil {
+      log.Error(err.Error())
+      return err
+    }
+  } else {
+    err = fb.HomeAuto.Login()
+    if err != nil {
+      return err
+    }
+  }
+
+  return nil
+}
+
+func (e *Exporter) Handler(w http.ResponseWriter, r *http.Request) {
+  prometheus.Handler().ServeHTTP(w, r)
 }
 
 func main() {
@@ -112,31 +196,19 @@ func main() {
     logging.SetBackend(logBackendLeveled)
 
     //load configuration
-    config, err := config.GetConfig(log, "prometheus-fritzbox-exporter.yml")
+    conf, err = config.GetConfig(log, "prometheus-fritzbox-exporter.yml")
     if err != nil {
       log.Error(err.Error())
       os.Exit(1)
     }
     
-    fb, err = fritzbox.NewFritzBox(log, *config.FritzBox)
-    if err != nil {
-      log.Error(err.Error())
-      os.Exit(1)
-    }
-
     exporter := NewExporter()
     prometheus.MustRegister(exporter)
 
     http.HandleFunc("/metrics", exporter.Handler)
 
-    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {w.Write("Use /metrics")})
+    http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {w.Write([]byte("Use /metrics"))})
 
-    log.Info("Listening on", config.Exporter.ListenAddress)
-    log.Error(http.ListenAndServe(config.Exporter.ListenAddress, nil))
-    
-//    err = fritzbox.SetTemperature("Wohnzimmer", 17)
-//    if err != nil {
-//      log.Error(err.Error())
-//      os.Exit(1)
-//    }
+    log.Info("Listening on", conf.Exporter.ListenAddress)
+    log.Error(http.ListenAndServe(conf.Exporter.ListenAddress, nil))
 }
