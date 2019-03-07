@@ -1,6 +1,7 @@
 package main
 
 import (
+    "fmt"
     "os"
 //    "flag"
     "time"
@@ -35,6 +36,10 @@ type Exporter struct {
   duration, error, up           prometheus.Gauge
   totalScrapes                  prometheus.Counter
   scrapeErrors                  *prometheus.CounterVec
+
+  boxinfoLifetime               *prometheus.GaugeVec
+  boxinfoReboots                *prometheus.GaugeVec
+
   homeAutoDevicePresent         *prometheus.GaugeVec
   homeAutoDeviceTemperature     *prometheus.GaugeVec
 }
@@ -71,17 +76,49 @@ func NewExporter() *Exporter {
       Name:      "up",
       Help:      "Whether the connection to the FritzBox is established.",
     }),
+
+    boxinfoLifetime: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "boxinfo",
+      Name:      "lifetime",
+      Help:      "Days since date manufacture.",
+    }, []string{"model","firmware_version"}),
+    boxinfoReboots: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "boxinfo",
+      Name:      "reboots",
+      Help:      "Number of reboots since date of manufacture.",
+    }, []string{"model","firmware_version"}),
+
     homeAutoDevicePresent: prometheus.NewGaugeVec(prometheus.GaugeOpts{
       Namespace: namespace,
-      Name:      "homeauto_device_present",
+      Subsystem: "homeauto",
+      Name:      "device_present",
       Help:      "Whether the device is connected to the FritBox.",
     }, []string{"uuid","name","productname"}),
     homeAutoDeviceTemperature: prometheus.NewGaugeVec(prometheus.GaugeOpts{
       Namespace: namespace,
-      Name:      "homeauto_device_temperature",
+      Subsystem: "homeauto",
+      Name:      "device_temperature",
       Help:      "Gauge metric with temperature (in Celsius) of connected devices.",
     }, []string{"uuid","name","productname"}),
   }
+}
+
+func (e *Exporter) ScrapeBoxinfo() error {
+  boxinfo, err := fb.Internal.BoxInfo()
+  if err != nil {
+    return err
+  }
+
+  versionString := fmt.Sprintf("%s.%s.%s", boxinfo.FirmwareVersion.OsVersionMajor, boxinfo.FirmwareVersion.OsVersionMinor, boxinfo.FirmwareVersion.OsVersionRevision)
+
+  e.boxinfoLifetime.WithLabelValues(boxinfo.Model.Name, versionString).Set(
+    float64(boxinfo.Runtime.Years) * 365.24220 + float64(boxinfo.Runtime.Months) * 30.43685 + float64(boxinfo.Runtime.Days))
+
+  e.boxinfoReboots.WithLabelValues(boxinfo.Model.Name, versionString).Set(float64(boxinfo.Runtime.Reboots))
+
+  return nil
 }
 
 func (e *Exporter) ScrapeHomeAutoDevices() error {
@@ -104,18 +141,6 @@ func (e *Exporter) ScrapeHomeAutoDevices() error {
   return nil
 }
 
-func (e *Exporter) ScrapeUptime() error {
-  boxinfo, err := fb.Internal.BoxInfo()
-  if err != nil {
-    return err
-  }
-
-  log.Debug(boxinfo)
-
-  return nil
-}
-
-
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
   var err error
 
@@ -133,11 +158,14 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
   if err == nil {
     e.error.Set(0)
 
+    e.ScrapeBoxinfo()
+    e.boxinfoLifetime.Collect(ch)
+    e.boxinfoReboots.Collect(ch)
+
     e.ScrapeHomeAutoDevices()
     e.homeAutoDevicePresent.Collect(ch)
     e.homeAutoDeviceTemperature.Collect(ch)
 
-    e.ScrapeUptime()
     
   } else {
     e.error.Set(1)
