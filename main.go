@@ -14,6 +14,7 @@ import (
 
     "github.com/op/go-logging"
     "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var log = logging.MustGetLogger("fritzbox-exporter")
@@ -44,6 +45,9 @@ type Exporter struct {
 
   homeAutoDevicePresent         *prometheus.GaugeVec
   homeAutoDeviceTemperature     *prometheus.GaugeVec
+  homeAutoDeviceSwitchState     *prometheus.GaugeVec
+  homeAutoDevicePower           *prometheus.GaugeVec
+  homeAutoDeviceEnergy          *prometheus.GaugeVec
 }
 
 func NewExporter() *Exporter {
@@ -112,6 +116,24 @@ func NewExporter() *Exporter {
       Name:      "device_temperature",
       Help:      "Gauge metric with temperature (in Celsius) of connected devices.",
     }, []string{"uuid","name","productname"}),
+    homeAutoDeviceSwitchState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "homeauto",
+      Name:      "device_switch_state",
+      Help:      "Whether the switch device is on or off.",
+    }, []string{"uuid","name","productname"}),
+    homeAutoDevicePower: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "homeauto",
+      Name:      "device_power",
+      Help:      "Gauge metric with current power (in Watt) of connected devices.",
+    }, []string{"uuid","name","productname"}),
+    homeAutoDeviceEnergy: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+      Namespace: namespace,
+      Subsystem: "homeauto",
+      Name:      "device_energy",
+      Help:      "Counter metric with absolute energy consumption (in Watt hours) since the device started operating.",
+    }, []string{"uuid","name","productname"}),
   }
 }
 
@@ -132,6 +154,7 @@ func (e *Exporter) ScrapeBoxinfo() error {
 }
 
 func (e *Exporter) ScrapeInternetStats() error {
+/*
   stats, err := fb.Internal.InternetStats()
   if err != nil {
     return err
@@ -139,13 +162,11 @@ func (e *Exporter) ScrapeInternetStats() error {
 
   e.internetStats.WithLabelValues("downstream", "internet").Set(avg(stats.DownstreamInternet))
   e.internetStats.WithLabelValues("downstream", "media").Set(avg(stats.DownStreamMedia))
-  e.internetStats.WithLabelValues("downstream", "guest").Set(avg(stats.DownStreamGuest))
   e.internetStats.WithLabelValues("upstream", "realtime").Set(avg(stats.UpstreamRealtime))
   e.internetStats.WithLabelValues("upstream", "high").Set(avg(stats.UpstreamHighPriority))
   e.internetStats.WithLabelValues("upstream", "default").Set(avg(stats.UpstreamDefaultPriority))
   e.internetStats.WithLabelValues("upstream", "low").Set(avg(stats.UpstreamLowPriority))
-  e.internetStats.WithLabelValues("upstream", "guest").Set(avg(stats.UpstreamGuest))
-
+*/
   return nil
 }
 
@@ -160,12 +181,34 @@ func (e *Exporter) ScrapeHomeAutoDevices() error {
     e.homeAutoDevicePresent.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(float64(device.Present))
 
     //temperature if available
-    temperature, err := strconv.ParseFloat(device.Temperature.FmtCelsius(), 64)
-    if err == nil {
-      e.homeAutoDeviceTemperature.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(temperature)
+    if device.CanMeasureTemp() {
+      temperature, err := strconv.ParseFloat(device.Temperature.FmtCelsius(), 64)
+      if err == nil {
+        e.homeAutoDeviceTemperature.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(temperature)
+      }
+    }
+
+    //switch state if available
+    if device.IsSwitch() {
+      switchState, err := strconv.ParseFloat(device.Switch.State, 64)
+      if err == nil {
+        e.homeAutoDeviceSwitchState.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(switchState)
+      }
+    }
+
+    //power/energy if available
+    if device.CanMeasurePower() {
+      power, err := strconv.ParseFloat(device.Powermeter.Power, 64)
+      if err == nil {
+        e.homeAutoDevicePower.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(power * 0.001)
+      }
+
+      energy, err := strconv.ParseFloat(device.Powermeter.Energy, 64)
+      if err == nil {
+        e.homeAutoDeviceEnergy.WithLabelValues(device.Identifier, device.Name, device.Productname).Set(energy)
+      }
     }
   }
-
   return nil
 }
 
@@ -196,6 +239,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
     e.ScrapeHomeAutoDevices()
     e.homeAutoDevicePresent.Collect(ch)
     e.homeAutoDeviceTemperature.Collect(ch)
+    e.homeAutoDeviceSwitchState.Collect(ch)
+    e.homeAutoDevicePower.Collect(ch)
+    e.homeAutoDeviceEnergy.Collect(ch)
 
     
   } else {
@@ -218,6 +264,9 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 
   e.homeAutoDevicePresent.Describe(ch)
   e.homeAutoDeviceTemperature.Describe(ch)
+  e.homeAutoDeviceSwitchState.Describe(ch)
+  e.homeAutoDevicePower.Describe(ch)
+  e.homeAutoDeviceEnergy.Describe(ch)
 }
 
 func (e *Exporter) Connect() error {
@@ -242,7 +291,7 @@ func (e *Exporter) Connect() error {
 }
 
 func (e *Exporter) Handler(w http.ResponseWriter, r *http.Request) {
-  prometheus.Handler().ServeHTTP(w, r)
+  promhttp.Handler().ServeHTTP(w, r)
 }
 
 func main() {
