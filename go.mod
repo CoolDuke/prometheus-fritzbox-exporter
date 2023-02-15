@@ -8,6 +8,6 @@ require (
 	github.com/mattn/go-colorable v0.1.4 // indirect
 	github.com/mattn/go-isatty v0.0.10 // indirect
 	github.com/op/go-logging v0.0.0-20160315200505-970db520ece7
-	github.com/prometheus/client_golang v1.2.0
-	gopkg.in/yaml.v2 v2.2.4
+	github.com/prometheus/client_golang v1.11.1
+	gopkg.in/yaml.v2 v2.3.0
 )
